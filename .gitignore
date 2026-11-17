@@ -223,6 +223,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 # --- AutoTrade ---
-# 本機資料庫與 log
-data/
-logs/
+# 本機資料庫與 log。開頭的 / 代表只排除專案最外層的資料夾，
+# 不會誤排除程式碼裡同名的資料夾（例如 src/autotrade/data/）
+/data/
+/logs/
