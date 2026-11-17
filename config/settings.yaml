@@ -1,0 +1,111 @@
+# 記憶體產業監測設定
+# 這個檔案不含任何密碼，可以放進版本控制。密碼與 API key 請放在 .env。
+
+timezone: Asia/Taipei
+
+watchlist:
+  # 台股觀察標的，segment 是在產業鏈中的位置
+  taiwan:
+    - { code: "2408", name: 南亞科, segment: DRAM原廠 }
+    - { code: "2344", name: 華邦電, segment: DRAM原廠 }
+    - { code: "2337", name: 旺宏, segment: NOR/NAND }
+    - { code: "6770", name: 力積電, segment: 代工 }
+    - { code: "3006", name: 晶豪科, segment: IC設計 }
+    - { code: "8299", name: 群聯, segment: 控制晶片 }
+    - { code: "3260", name: 威剛, segment: 模組廠 }
+    - { code: "4967", name: 十銓, segment: 模組廠 }
+    - { code: "2451", name: 創見, segment: 模組廠 }
+    - { code: "8271", name: 宇瞻, segment: 模組廠 }
+    - { code: "4973", name: 廣穎, segment: 模組廠 }
+    - { code: "5289", name: 宜鼎, segment: 模組廠 }
+  # 國際風向球，只用於新聞比對，不抓台股數據
+  international:
+    - { name: 美光, ticker: MU, aliases: [Micron] }
+    - { name: 三星, ticker: "005930.KS", aliases: [Samsung] }
+    - { name: SK海力士, ticker: "000660.KS", aliases: [SK hynix, 海力士] }
+    - { name: 鎧俠, ticker: "285A.T", aliases: [Kioxia] }
+    - { name: SanDisk, ticker: SNDK, aliases: [閃迪] }
+
+keywords:
+  products: [記憶體, DRAM, NAND, HBM, HBM4, DDR4, DDR5, LPDDR5X, eSSD, NOR Flash]
+  price: [合約價, 現貨價, 漲價, 報價, 議價]
+  supply_demand: [減產, 擴產, 缺貨, 庫存, 長約, LTA, 產能, 資本支出]
+  # 風險訊號：之後會設定為高優先通知
+  risk: [跌價, 修正, 庫存增加, 砍單, 長鑫, 長江存儲]
+
+sources:
+  google_news:
+    enabled: true
+    # 只抓最近一天的新聞（可用 12h、1d、7d 等）
+    when: 1d
+    # 搜尋語法：空白代表 AND，OR 要大寫。每個查詢最多回傳約 100 則
+    queries:
+      - 記憶體 OR DRAM OR NAND OR HBM
+      - 記憶體 報價
+      - 南亞科 OR 華邦電 OR 旺宏 OR 力積電 OR 晶豪科 OR 群聯
+      - 威剛 OR 十銓 OR 創見 OR 宇瞻 OR 廣穎 OR 宜鼎
+      - 美光 OR SK海力士 OR 鎧俠 OR SanDisk
+      - 三星 記憶體
+
+  # TrendForce（集邦）：官方 RSS 自 2026/07 起停止更新，改用 Google News 搜尋
+  # 中文媒體轉載的集邦報價調查。注意 Google News RSS 不支援 site: 語法
+  trendforce:
+    enabled: true
+    when: 3d
+    queries:
+      - TrendForce OR 集邦 DRAM OR NAND OR HBM
+      - TrendForce 記憶體
+      - 集邦 記憶體
+
+  # 公開資訊觀測站重大訊息（上市＋上櫃），只保留觀察標的
+  mops:
+    enabled: true
+
+  # PTT 看板搜尋，一個詞搜尋一次
+  ptt:
+    enabled: true
+    board: Stock
+    max_age_days: 3
+    queries: [記憶體, DRAM, NAND, HBM, 南亞科, 華邦電, 旺宏, 群聯, 威剛]
+
+# 數據線：現貨價、三大法人、融資融券、月營收
+data:
+  enabled: true
+  # 每次執行時，補抓最近幾天缺少的交易日資料
+  lookback_days: 7
+  # 證交所對短時間大量請求會暫時封鎖，請求之間間隔幾秒
+  request_delay_seconds: 2.5
+  prices:
+    enabled: true
+    # 要計算漲跌並提醒的品項（名稱需與 DRAMeXchange 網頁完全相同），其他品項也會存檔
+    track:
+      - DDR5 16Gb (2Gx8) 4800/5600
+      - DDR4 16Gb (2Gx8) 3200
+      - DDR4 8Gb (1Gx8) 3200
+      - 512Gb TLC
+      - 256Gb TLC
+  rules:
+    price_change_pct: 5        # 現貨價與約 7 天前相比漲跌超過 5%
+    foreign_streak_days: 5     # 外資連續 5 個交易日買超或賣超
+    margin_surge_pct: 10       # 融資餘額單日增加超過 10%
+    margin_min_balance: 1000   # 融資前日餘額至少 1000 張才檢查
+    revenue_release: true      # 月營收一公布就通知
+    alert_window_days: 3       # 只提醒最近 3 天內的數據
+
+health:
+  # 某個來源連續失敗幾次就寄信提醒
+  failure_alert_threshold: 3
+
+notify:
+  email:
+    subject_prefix: "[AutoTrade]"
+    # 一封信最多列幾則
+    max_items: 80
+
+storage:
+  # 相對路徑以專案根目錄為基準
+  db_path: data/autotrade.db
+
+logging:
+  level: INFO
+  file: logs/autotrade.log

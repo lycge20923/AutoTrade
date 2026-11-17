@@ -221,3 +221,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- AutoTrade ---
+# 本機資料庫與 log
+data/
+logs/
