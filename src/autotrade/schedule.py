@@ -126,3 +126,144 @@ def cron_line(times: list[str], python: str, project_root: Path, log_path: Path)
         lines = [f"{m} {h} * * *" for h, m in slots]
     cmd = f"cd {project_root} && {python} -m autotrade run >> {log_path} 2>&1"
     return "\n".join(f"{spec} {cmd}" for spec in lines)
+
+
+# ======================================================================
+# Linux：systemd 使用者層級的 timer
+# ======================================================================
+#
+# 設定檔放在 ~/.config/systemd/user/：
+# - autotrade.service：要執行的指令
+# - autotrade.timer：什麼時間執行；Persistent=true 讓關機錯過的排程在開機後補跑
+#
+# 使用者層級的 systemd 預設只在你登入時運作。主機上沒人登入也要執行的話，
+# 需要開啟 linger：sudo loginctl enable-linger <帳號>
+
+SYSTEMD_UNIT = "autotrade"
+
+
+def systemd_dir(home: Path | None = None) -> Path:
+    return (home or Path.home()) / ".config" / "systemd" / "user"
+
+
+def _quote(path: str) -> str:
+    return f'"{path}"' if " " in path else path
+
+
+def build_systemd_units(
+    times: list[str], python: str, project_root: Path, log_path: Path
+) -> tuple[str, str]:
+    slots = sorted({parse_time(t) for t in times})
+    if not slots:
+        raise ScheduleError("至少要指定一個時間")
+    service = f"""[Unit]
+Description=AutoTrade 記憶體產業監測
+
+[Service]
+Type=oneshot
+WorkingDirectory={project_root}
+ExecStart={_quote(python)} -m autotrade run
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=append:{log_path}
+StandardError=append:{log_path}
+"""
+    calendars = "\n".join(f"OnCalendar=*-*-* {h:02d}:{m:02d}:00" for h, m in slots)
+    timer = f"""[Unit]
+Description=AutoTrade 每日排程
+
+[Timer]
+{calendars}
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"""
+    return service, timer
+
+
+def _systemctl(runner: Runner, *args: str) -> subprocess.CompletedProcess:
+    return runner(["systemctl", "--user", *args], capture_output=True, text=True)
+
+
+def systemd_install(
+    times: list[str],
+    project_root: Path,
+    log_path: Path,
+    python: str = sys.executable,
+    runner: Runner = subprocess.run,
+    home: Path | None = None,
+) -> Path:
+    service, timer = build_systemd_units(times, python, project_root, log_path)
+    unit_dir = systemd_dir(home)
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    (unit_dir / f"{SYSTEMD_UNIT}.service").write_text(service, encoding="utf-8")
+    (unit_dir / f"{SYSTEMD_UNIT}.timer").write_text(timer, encoding="utf-8")
+
+    for args in (("daemon-reload",), ("enable", "--now", f"{SYSTEMD_UNIT}.timer"),
+                 ("restart", f"{SYSTEMD_UNIT}.timer")):
+        r = _systemctl(runner, *args)
+        if r.returncode != 0:
+            raise ScheduleError(f"systemctl {' '.join(args)} 失敗：{(r.stderr or r.stdout).strip()}")
+    return unit_dir / f"{SYSTEMD_UNIT}.timer"
+
+
+def systemd_uninstall(runner: Runner = subprocess.run, home: Path | None = None) -> bool:
+    unit_dir = systemd_dir(home)
+    files = [unit_dir / f"{SYSTEMD_UNIT}.timer", unit_dir / f"{SYSTEMD_UNIT}.service"]
+    if not any(f.exists() for f in files):
+        return False
+    _systemctl(runner, "disable", "--now", f"{SYSTEMD_UNIT}.timer")
+    for f in files:
+        if f.exists():
+            f.unlink()
+    _systemctl(runner, "daemon-reload")
+    return True
+
+
+def systemd_run_now(runner: Runner = subprocess.run) -> None:
+    # --no-block：在背景執行，指令立刻返回
+    r = _systemctl(runner, "start", "--no-block", f"{SYSTEMD_UNIT}.service")
+    if r.returncode != 0:
+        raise ScheduleError(f"無法立即執行：{(r.stderr or r.stdout).strip()}（排程安裝了嗎？）")
+
+
+def systemd_installed_times(home: Path | None = None) -> list[str] | None:
+    timer = systemd_dir(home) / f"{SYSTEMD_UNIT}.timer"
+    if not timer.exists():
+        return None
+    times = []
+    for line in timer.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"OnCalendar=\*-\*-\* (\d{2}):(\d{2})", line.strip())
+        if m:
+            times.append(f"{m.group(1)}:{m.group(2)}")
+    return times
+
+
+def systemd_is_active(runner: Runner = subprocess.run) -> bool:
+    return _systemctl(runner, "is-active", f"{SYSTEMD_UNIT}.timer").stdout.strip() == "active"
+
+
+def systemd_next_run(runner: Runner = subprocess.run) -> str:
+    r = _systemctl(runner, "list-timers", f"{SYSTEMD_UNIT}.timer", "--no-pager")
+    return r.stdout.strip()
+
+
+def linger_enabled(user: str, runner: Runner = subprocess.run) -> bool | None:
+    """沒人登入時是否仍會執行。無法判斷時回傳 None。"""
+    try:
+        r = runner(["loginctl", "show-user", user, "--property=Linger"], capture_output=True, text=True)
+    except FileNotFoundError:
+        return None
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip() == "Linger=yes"
+
+
+def local_timezone_matches(tz_name: str) -> bool:
+    """機器的本地時區是否與設定檔的時區相同（目前的 UTC 時差）。排程時間是看機器的時區。"""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    now = datetime.now().astimezone()
+    return now.utcoffset() == now.astimezone(ZoneInfo(tz_name)).utcoffset()

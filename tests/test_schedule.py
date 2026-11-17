@@ -90,3 +90,90 @@ def test_run_now_requires_install() -> None:
 def test_cron_line(tmp_path: Path) -> None:
     line = sch.cron_line(["07:30", "21:30"], "/py", Path("/proj"), Path("/proj/logs/l.log"))
     assert line == "30 7,21 * * * cd /proj && /py -m autotrade run >> /proj/logs/l.log 2>&1"
+
+
+# ---------- Linux systemd ----------
+
+class FakeSystemctl:
+    def __init__(self, fail: str | None = None, linger: str = "Linger=no"):
+        self.fail, self.linger = fail, linger
+        self.calls: list[list[str]] = []
+
+    def __call__(self, cmd, **kwargs):
+        self.calls.append(cmd)
+        if cmd[0] == "loginctl":
+            return subprocess.CompletedProcess(cmd, 0, self.linger + "\n", "")
+        if self.fail and self.fail in cmd:
+            return subprocess.CompletedProcess(cmd, 1, "", "Failed to connect to bus")
+        out = "active\n" if "is-active" in cmd else ""
+        return subprocess.CompletedProcess(cmd, 0, out, "")
+
+
+def test_build_systemd_units(tmp_path: Path) -> None:
+    service, timer = sch.build_systemd_units(["21:30", "07:30"], "/home/u/AutoTrade/.venv/bin/python",
+                                             Path("/home/u/AutoTrade"), Path("/home/u/AutoTrade/logs/s.log"))
+    assert "Type=oneshot" in service
+    assert "WorkingDirectory=/home/u/AutoTrade" in service
+    assert "ExecStart=/home/u/AutoTrade/.venv/bin/python -m autotrade run" in service
+    assert "StandardOutput=append:/home/u/AutoTrade/logs/s.log" in service
+    assert "OnCalendar=*-*-* 07:30:00\nOnCalendar=*-*-* 21:30:00" in timer
+    assert "Persistent=true" in timer and "WantedBy=timers.target" in timer
+
+
+def test_systemd_quotes_paths_with_spaces(tmp_path: Path) -> None:
+    service, _ = sch.build_systemd_units(["07:30"], "/home/u/My Code/.venv/bin/python", tmp_path, tmp_path / "l")
+    assert 'ExecStart="/home/u/My Code/.venv/bin/python" -m autotrade run' in service
+
+
+def test_systemd_install_and_uninstall(tmp_path: Path) -> None:
+    fake = FakeSystemctl()
+    path = sch.systemd_install(["07:30", "21:30"], tmp_path / "proj", tmp_path / "proj/logs/s.log",
+                               python="/py", runner=fake, home=tmp_path)
+    assert path == tmp_path / ".config/systemd/user/autotrade.timer"
+    assert (tmp_path / ".config/systemd/user/autotrade.service").exists()
+    assert fake.calls == [
+        ["systemctl", "--user", "daemon-reload"],
+        ["systemctl", "--user", "enable", "--now", "autotrade.timer"],
+        ["systemctl", "--user", "restart", "autotrade.timer"],
+    ]
+    assert sch.systemd_installed_times(tmp_path) == ["07:30", "21:30"]
+    assert sch.systemd_is_active(fake)
+
+    assert sch.systemd_uninstall(runner=fake, home=tmp_path) is True
+    assert sch.systemd_installed_times(tmp_path) is None
+    assert sch.systemd_uninstall(runner=fake, home=tmp_path) is False
+
+
+def test_systemd_install_failure(tmp_path: Path) -> None:
+    with pytest.raises(sch.ScheduleError, match="Failed to connect to bus"):
+        sch.systemd_install(["07:30"], tmp_path, tmp_path / "l", python="/py",
+                            runner=FakeSystemctl(fail="daemon-reload"), home=tmp_path)
+
+
+def test_systemd_run_now() -> None:
+    fake = FakeSystemctl()
+    sch.systemd_run_now(fake)
+    assert fake.calls == [["systemctl", "--user", "start", "--no-block", "autotrade.service"]]
+
+
+def test_linger() -> None:
+    assert sch.linger_enabled("u", FakeSystemctl(linger="Linger=yes")) is True
+    assert sch.linger_enabled("u", FakeSystemctl(linger="Linger=no")) is False
+
+
+def test_local_timezone_matches() -> None:
+    import os
+    import time
+
+    old = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "Asia/Taipei"; time.tzset()
+        assert sch.local_timezone_matches("Asia/Taipei")
+        os.environ["TZ"] = "UTC"; time.tzset()
+        assert not sch.local_timezone_matches("Asia/Taipei")
+    finally:
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()

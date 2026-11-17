@@ -227,40 +227,88 @@ def _cmd_backfill(settings: Settings, args: argparse.Namespace) -> int:
 
 
 def _cmd_schedule(settings: Settings, args: argparse.Namespace) -> int:
+    import shutil
+
     from autotrade import schedule as sch
 
-    log_path = settings.resolve_path(Path("logs/launchd.log"))
-    if sys.platform != "darwin":
-        print("自動排程指令目前只支援 macOS。其他系統可以用 cron，例如在 crontab -e 加入：\n")
-        print(sch.cron_line(args.times or sch.DEFAULT_TIMES, sys.executable, settings.project_root, log_path))
-        return 1
+    times = args.times or sch.DEFAULT_TIMES
     try:
-        if args.action == "install":
-            times = args.times or sch.DEFAULT_TIMES
-            path = sch.install(times, settings.project_root, log_path)
-            print(f"✅ 已設定每天 {'、'.join(sorted(times))} 自動執行。")
-            print(f"   排程設定檔：{path}")
-            print(f"   執行紀錄：{log_path}")
-            print("\n建議接著執行 `uv run autotrade schedule run-now` 立刻測試一次。")
-            print("如果 macOS 跳出「是否允許存取『文件』檔案夾」的提示，請按允許。")
-        elif args.action == "uninstall":
-            removed = sch.uninstall()
-            print("✅ 已移除自動排程。" if removed else "目前沒有安裝自動排程。")
-        elif args.action == "run-now":
-            sch.run_now()
-            print(f"▶ 已在背景開始執行，約 1～2 分鐘後完成。進度請看：{log_path}")
-            print(f"   例如：tail -f {log_path}")
-        else:  # status
-            times = sch.installed_times()
-            if times is None:
-                print("目前沒有安裝自動排程。執行 `uv run autotrade schedule install` 安裝。")
-            else:
-                state = "已載入" if sch.is_loaded() else "設定檔存在但未載入（請重新執行 install）"
-                print(f"自動排程：每天 {'、'.join(times)}（{state}）")
-                print(f"執行紀錄：{log_path}")
+        if sys.platform == "darwin":
+            return _schedule_launchd(sch, settings, args.action, times)
+        if sys.platform.startswith("linux") and shutil.which("systemctl"):
+            return _schedule_systemd(sch, settings, args.action, times)
     except sch.ScheduleError as exc:
         print(f"❌ {exc}", file=sys.stderr)
         return 1
+
+    log_path = settings.resolve_path(Path("logs/schedule.log"))
+    print("這台電腦沒有 launchd 或 systemd，請改用 cron。執行 crontab -e 後加入：\n")
+    print(sch.cron_line(times, sys.executable, settings.project_root, log_path))
+    return 1
+
+
+def _schedule_launchd(sch, settings: Settings, action: str, times: list[str]) -> int:
+    log_path = settings.resolve_path(Path("logs/launchd.log"))
+    if action == "install":
+        path = sch.install(times, settings.project_root, log_path)
+        print(f"✅ 已設定每天 {'、'.join(sorted(times))} 自動執行（macOS launchd）。")
+        print(f"   排程設定檔：{path}")
+        print(f"   執行紀錄：{log_path}")
+        print("\n建議接著執行 `uv run autotrade schedule run-now` 立刻測試一次。")
+        print("如果 macOS 跳出「是否允許存取『文件』檔案夾」的提示，請按允許。")
+    elif action == "uninstall":
+        print("✅ 已移除自動排程。" if sch.uninstall() else "目前沒有安裝自動排程。")
+    elif action == "run-now":
+        sch.run_now()
+        print(f"▶ 已在背景開始執行，約 1～2 分鐘後完成。進度請看：tail -f {log_path}")
+    else:
+        installed = sch.installed_times()
+        if installed is None:
+            print("目前沒有安裝自動排程。執行 `uv run autotrade schedule install` 安裝。")
+        else:
+            state = "已啟用" if sch.is_loaded() else "設定檔存在但未載入（請重新執行 install）"
+            print(f"自動排程：每天 {'、'.join(installed)}（{state}）")
+            print(f"執行紀錄：{log_path}")
+    return 0
+
+
+def _schedule_systemd(sch, settings: Settings, action: str, times: list[str]) -> int:
+    import getpass
+
+    log_path = settings.resolve_path(Path("logs/schedule.log"))
+    user = getpass.getuser()
+    if action == "install":
+        path = sch.systemd_install(times, settings.project_root, log_path)
+        print(f"✅ 已設定每天 {'、'.join(sorted(times))} 自動執行（systemd timer）。")
+        print(f"   排程設定檔：{path}")
+        print(f"   執行紀錄：{log_path}")
+        if not sch.local_timezone_matches(settings.app.timezone):
+            print(f"\n⚠️ 這台電腦的時區不是 {settings.app.timezone}，排程會依電腦的時區執行。")
+            print(f"   建議執行：sudo timedatectl set-timezone {settings.app.timezone}")
+        linger = sch.linger_enabled(user)
+        if linger is False:
+            print("\n⚠️ 目前只有在你登入這台電腦時才會執行。")
+            print("   如果這是主機、平常沒有人登入，請執行（需要 sudo）：")
+            print(f"   sudo loginctl enable-linger {user}")
+        print("\n建議接著執行 `uv run autotrade schedule run-now` 立刻測試一次。")
+    elif action == "uninstall":
+        print("✅ 已移除自動排程。" if sch.systemd_uninstall() else "目前沒有安裝自動排程。")
+    elif action == "run-now":
+        sch.systemd_run_now()
+        print(f"▶ 已在背景開始執行，約 1～2 分鐘後完成。進度請看：tail -f {log_path}")
+    else:
+        installed = sch.systemd_installed_times()
+        if installed is None:
+            print("目前沒有安裝自動排程。執行 `uv run autotrade schedule install` 安裝。")
+            return 0
+        state = "已啟用" if sch.systemd_is_active() else "設定檔存在但未啟用（請重新執行 install）"
+        print(f"自動排程：每天 {'、'.join(installed)}（{state}）")
+        print(f"執行紀錄：{log_path}")
+        if sch.linger_enabled(user) is False:
+            print(f"⚠️ 只有登入時才會執行；主機請執行 sudo loginctl enable-linger {user}")
+        nxt = sch.systemd_next_run()
+        if nxt:
+            print(f"\n{nxt}")
     return 0
 
 
@@ -321,7 +369,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_bf.add_argument("--days", type=int, default=30, help="回補幾天（預設 30）")
     p_bf.set_defaults(func=_cmd_backfill)
 
-    p_sch = sub.add_parser("schedule", help="設定每天自動執行（macOS）")
+    p_sch = sub.add_parser("schedule", help="設定每天自動執行（macOS 用 launchd，Linux 用 systemd）")
     p_sch.add_argument("action", choices=["install", "uninstall", "status", "run-now"],
                        help="install 安裝／uninstall 移除／status 查看／run-now 立即執行一次")
     p_sch.add_argument("--times", nargs="+", metavar="HH:MM",

@@ -57,7 +57,7 @@ uv run autotrade data prices     # 查記憶體現貨價
 uv run pytest                    # 執行測試
 ```
 
-### 每天自動執行（macOS）
+### 每天自動執行（macOS／Linux）
 
 ```bash
 uv run autotrade schedule install                        # 預設每天 07:30、21:30
@@ -67,9 +67,14 @@ uv run autotrade schedule status                         # 查看目前排程
 uv run autotrade schedule uninstall                      # 移除排程
 ```
 
-- 使用 macOS 內建的 launchd。排定時間電腦在睡眠的話，醒來後會補跑一次；關機則會跳過。
-- 執行紀錄在 `logs/launchd.log`。
-- 專案放在「文件」資料夾時，第一次背景執行 macOS 可能會詢問是否允許存取，請按允許。
+- 指令會自動判斷系統：macOS 用 launchd，Linux 用 systemd timer，兩者都沒有時會印出 cron 設定範例。
+- **macOS**：排定時間電腦在睡眠的話，醒來後會補跑一次；關機則會跳過。執行紀錄在 `logs/launchd.log`。
+- **Linux**：關機錯過的排程，開機後會補跑一次。執行紀錄在 `logs/schedule.log`。
+  使用者層級的 systemd 預設只在你登入時運作；主機平常沒人登入的話，
+  需要執行 `sudo loginctl enable-linger <帳號>`（install 時會提醒）。
+- 排程時間依電腦本身的時區，請確認是 Asia/Taipei（`timedatectl` 可查看）。
+- 換電腦執行時，記得先移除舊電腦上的排程，避免兩邊都寄信。
+- macOS 專案放在「文件」資料夾時，第一次背景執行可能會詢問是否允許存取，請按允許。
   如果紀錄裡出現 `Operation not permitted`，到「系統設定 → 隱私權與安全性 → 完整磁碟取用權限」
   加入 `.venv/bin/python` 指向的 Python，或把專案移到「文件」以外的資料夾。
 
